@@ -1,3 +1,170 @@
+# 第三批：C++20 concept 与变量模板不产生节点
+
+> 本文件按顺序追加每批修复。前两批见下方历史段落。
+
+## 触发场景
+
+从桌面清单 `C++开源项目研读清单100个.md`（117 条）里按 API 体积挑出 10 个最小
+的 C/C++ 仓库 clone 到 `F:\vsProject`，逐个建图后写了一个 C++11–20 语法探针
+`F:\tmp\cpp_probe\modern_cpp.cpp` 压解析器，发现 C++20 的两个核心特性完全没有节点。
+
+## 缺陷 1：concept 不产生节点
+
+```
+template <typename T> concept Integral = is_int_v<T>;
+template <Integral T> T clamp_value(T v, T lo, T hi);
+```
+
+`Integral` 在图里**不存在**。
+
+`concept_definition` 在 parser 里只出现在 `_CPP_HEADER_EVIDENCE_TYPES` ——
+那个集合的用途是判断 `.h` 是 C 还是 C++，**从不用来建节点**。
+
+后果：被约束的函数能找到，约束它的 concept 找不到。"这个模板要求什么"无法回答，
+`requires_clamp` 无法追溯到 `Integral`。
+
+## 缺陷 2：变量模板被丢弃
+
+```
+template <typename T> constexpr bool is_int_v = false;   -> 无节点
+template <> constexpr bool is_int_v<int> = true;         -> 无节点
+```
+
+走的路径不同：解析成 `template_declaration > declaration > init_declarator > identifier`，
+而 `declaration` 在 cpp 的 `_FUNCTION_TYPES` 里，于是被送到 `_extract_functions`。
+那里 `_get_name` 调 `_cpp_is_callable_declaration`，`init_declarator` 不是 callable
+→ 返回 None → 节点被丢弃，什么都没记下。
+
+讽刺的是：concept 就算修好了能建节点，它引用的 `is_int_v` 仍然不存在，约束照样无法解析。
+
+## 改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `_CLASS_TYPES["cpp"]` | 加 `concept_definition` |
+| `_extract_classes` | cpp/c 的 struct/union/enum/typedef/**concept** 发 `kind="Type"`，留 `extra["cpp_kind"]` |
+| `_extract_functions` | `_get_name` 返回 None 时改调新增的 `_extract_cpp_value_declaration` |
+| 新增 `_extract_cpp_value_declaration` | 收变量模板/命名空间常量，发 `kind="Type"` + `extra["cpp_kind"]="variable_template"` |
+| 新增 `_cpp_declaration_is_local` | 父链上有 function_definition/lambda/compound_statement 就跳过 |
+| 新增 `_cpp_has_const_qualifier` | 要求 constexpr/constinit/const |
+| 新增 `_cpp_declarator_is_function` | declarator 链含 function_declarator/parameter_list 就不收 |
+| 新增模块级 `_CPP_IDENTIFIER_RE` | 名字必须是合法标识符 |
+
+## 三个必须同时存在的守卫（都是踩出来的）
+
+### 守卫 1：排除函数内局部变量
+第一版把 `void f() { int total = 0; }` 里的 `total`、`i` 以及 main 里所有局部变量
+都标成了 `variable_template`。walker **会递归进函数体**，我原先假设它只在顶层派发——错的。
+修：`_cpp_declaration_is_local` 检查父链。
+
+### 守卫 2：必须证明「不是函数」才收
+加了守卫 1 之后，`tl::optional` 的 **41 个方法全部消失**（map / and_then /
+transform / or_else / map_or），整个 monadic 接口没了。
+
+这些方法的形状是：
+```cpp
+template <class F>
+TL_OPTIONAL_11_CONSTEXPR decltype(optional_map_impl(std::declval<optional &>(), ...))
+map(F &&f) & { ... }
+```
+在 `template_declaration` 里 + 带 constexpr → 我的守卫放行；
+而 `_get_name` 对它们**本来就会返回 None**（尾置 ref-qualifier + decltype 返回
+让 callable 探测失败），于是被我当成常量收走。
+
+**教训：`_get_name` 失败不等于"这是常量"。** 修：`_cpp_declarator_is_function`
+主动检查 declarator 链，是函数就让路。
+
+### 守卫 3：名字必须是合法标识符
+修完守卫 2 后仍掉 41 个。抓到一个名字是**整个模板头**的节点：
+```
+"template <\r\n      class U = T,\r\n      detail::enable_if_t<...>"
+```
+来自默认模板参数——`declarator` 字段取到的是参数列表不是 identifier。
+
+单独 parse 时 226 个 Function 全在，但 build 合并后只剩 224：名字不是标识符
+就没法当稳定的合并键，把兄弟节点一起拖掉了。修：`_CPP_IDENTIFIER_RE.fullmatch`。
+
+## 修后实测
+
+### 语法探针 `F:\tmp\cpp_probe\modern_cpp.cpp`
+| | 修前 | 修后 |
+|---|---|---|
+| `Integral`（concept） | 缺失 | **Type @ L62** |
+| `is_int_v`（变量模板） | 缺失 | **Type @ L47** |
+| 局部变量 total/i/a/h/... | — | **全部 clean**（未被误收） |
+| 总节点 | 26 | **28**（只多该多的 2 个） |
+
+### 10 个 clone 项目（对照基线 = 第一批修复后的 parser.py）
+Function 数**全部与基线一致**，只新增该增的 Type：
+
+| 项目 | Function 基线/修后 | 新增 variable_template |
+|---|---|---|
+| Seqlock | 5 / 5 | 0 |
+| partcl | 42 / 42 | 0 |
+| MPMCQueue | 28 / 28 | 1 |
+| SPSCQueue | 23 / 23 | 0 |
+| libco | 151 / 151 | 0 |
+| utf8.h | 93 / 93 | 0 |
+| stduuid | 1703 / 1703 | **17** |
+| optional | 265 / **265** | 4 |
+| Containers | 373 / 373 | 0 |
+| type_safe | 907 / 907 | **5** |
+
+concept 全是 0 —— 这 10 个项目是 C++11/14/17，本来就没用 C++20 concept，符合预期。
+
+## 对比方法（重要，我在这栽过）
+
+**不能用 `git stash` 整个 parser.py 当基线** —— parser.py 同时含第一批（struct→Type）
+和第三批改动，stash 会把两批一起去掉，得出假的"节点数变化"。
+
+正确做法：`git show c18ea3d:code_review_graph/parser.py` 取出第一批提交时的
+parser.py 作为基线，它含第一批、不含第三批。
+
+## 新增测试
+
+`tests/test_cpp20_concepts.py`（6 个）+ fixture `tests/fixtures/cpp_cpp20_concepts/sample.cpp`：
+- concept 产生节点且 kind=Type
+- 变量模板产生节点
+- 被约束的函数仍是 Function
+- **尾置 ref-qualifier 的成员方法不被当成变量模板**（守卫 2 的回归测试）
+- 普通方法不受影响
+- **没有任何节点的名字是畸形**（守卫 3 的回归测试）
+
+## 测试状态
+
+```
+153 failed, 4115 passed
+```
+失败数与上批完全一致（153），新增 6 个通过，零回归。
+
+---
+
+# 仓库/环境备忘（承接上文）
+
+## clone 的 10 个项目
+
+`F:\vsProject\<owner>__<repo>`（`/` 换成 `__`，因为 Windows 路径）：
+```
+rigtorp__Seqlock        zserge__partcl        rigtorp__MPMCQueue
+rigtorp__SPSCQueue      Tencent__libco        sheredom__utf8.h
+mariusbancila__stduuid  TartanLlama__optional bkthomps__Containers
+foonathan__type_safe
+```
+图数据在 `F:\tmp\scan\<repo>_base` / `_fixed`（base = 第一批后的基线）。
+
+体积探测结果在 `F:\tmp\repo_sizes.json`（117 个仓库的 API size）。
+最小的几个：Seqlock 0.02MB、partcl 0.03MB、MPMCQueue 0.08MB、SPSCQueue 0.17MB、
+libco 0.19MB。
+
+## 第三方测试头会污染统计
+
+`mariusbancila__stduuid` 11 个文件出了 2039 个节点，因为
+`catch/catch.hpp` 单文件就 1891 个节点。`utf8.h` 的 `test/utest.h` 同理。
+扫自有代码前要排除 `vendor/`、`test/`、`catch/` 这类第三方头，否则
+dead-code 和大函数统计全是噪声。
+
+---
+
 > 这份文件是给「未来的我 / 另一个会话 / 另一台机器」看的。
 > 读完这份，不需要重跑任何调查就能接手。
 

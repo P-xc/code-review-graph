@@ -1054,6 +1054,12 @@ _CPP_HEADER_EVIDENCE_TYPES = frozenset({
 
 _CPP_HEADER_EVIDENCE_QUALIFIERS = frozenset({b"consteval", b"constinit"})
 
+# A C++ identifier, optionally qualified. Deliberately strict: it must be
+# usable as a merge key and as a query target.
+_CPP_IDENTIFIER_RE = re.compile(
+    r"[A-Za-z_~][A-Za-z0-9_]*(?:::[A-Za-z_~][A-Za-z0-9_]*)*"
+)
+
 _CPP_QT_STRUCTURAL_MACRO_REPLACEMENTS = {
     b"QT_BEGIN_NAMESPACE": b" " * len(b"QT_BEGIN_NAMESPACE"),
     b"QT_END_NAMESPACE": b" " * len(b"QT_END_NAMESPACE"),
@@ -1169,7 +1175,11 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "rust": ["struct_item", "enum_item", "trait_item"],
     "java": ["class_declaration", "interface_declaration", "enum_declaration"],
     "c": ["struct_specifier", "type_definition"],
-    "cpp": ["class_specifier", "struct_specifier"],
+    # concept_definition is a C++20 type-level declaration: it constrains
+    # templates the way an interface constrains implementors, so it needs
+    # a node the way TS interface_declaration does (#737). Without it a
+    # constrained template cannot be traced back to what constrains it.
+    "cpp": ["class_specifier", "struct_specifier", "concept_definition"],
     "csharp": [
         "class_declaration", "interface_declaration",
         "enum_declaration", "struct_declaration",
@@ -11728,10 +11738,12 @@ class CodeParser:
         # unreferenced classes, so every header struct was reported dead.
         node_kind = "Class"
         if language in ("c", "cpp"):
+            extra["cpp_kind"] = child.type
             extra["c_kind"] = child.type
             if child.type in (
                 "struct_specifier", "union_specifier",
                 "enum_specifier", "type_definition",
+                "concept_definition",
             ):
                 node_kind = "Type"
 
@@ -11801,6 +11813,134 @@ class CodeParser:
         )
         return True
 
+    @staticmethod
+    def _cpp_declarator_is_function(node) -> bool:
+        """True when a declarator declares a function or a method.
+
+        A function declarator or a parameter list anywhere in the chain
+        means the declaration is callable, so it belongs to the function
+        path even when that path could not extract a name for it.
+        """
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current.type in ("function_declarator", "parameter_list"):
+                return True
+            for child in current.children:
+                if child.is_named:
+                    stack.append(child)
+        return False
+
+    @staticmethod
+    def _cpp_declaration_is_local(node) -> bool:
+        """True when a declaration sits inside a function body.
+
+        Walks up the tree: a function definition, a lambda, or a compound
+        statement above the declaration means it is a local variable, not a
+        namespace-scope constant or a variable template.
+        """
+        current = node.parent
+        while current is not None:
+            if current.type in (
+                "function_definition", "lambda_expression",
+                "compound_statement", "constructor_or_destructor_definition",
+            ):
+                return True
+            current = current.parent
+        return False
+
+    @staticmethod
+    def _cpp_has_const_qualifier(node) -> bool:
+        """True when a declaration is a constant (constexpr/constinit/const)."""
+        for child in node.children:
+            if child.type == "type_qualifier":
+                text = child.text.decode("utf-8", errors="replace")
+                if text in ("constexpr", "constinit", "const"):
+                    return True
+            if child.type == "storage_class_specifier":
+                text = child.text.decode("utf-8", errors="replace")
+                if text in ("constexpr", "constinit"):
+                    return True
+        return False
+
+    def _extract_cpp_value_declaration(
+        self,
+        child,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+    ) -> bool:
+        """Record a C++ variable template / namespace-scope constant.
+
+        Only fires for a declaration whose name sits in an
+        ``init_declarator``, which at namespace or template scope means a
+        constant. A function-local declaration is never visited here
+        because the walker only dispatches top-level declarations.
+        """
+        if language != "cpp" or child.type != "declaration":
+            return False
+        # Only declarations the walker reaches at namespace or class scope.
+        # It recurses into function bodies too, and a local `int total = 0;`
+        # is not a variable template.
+        if self._cpp_declaration_is_local(child):
+            return False
+        parent = child.parent
+        in_template = parent is not None and parent.type == "template_declaration"
+        if not in_template and not self._cpp_has_const_qualifier(child):
+            return False
+        declarator = child.child_by_field_name("declarator")
+        if declarator is None or declarator.type != "init_declarator":
+            return False
+        # Prove it is NOT a function before claiming it. _get_name can
+        # fail on a perfectly ordinary method (a trailing ref-qualifier
+        # or a decltype return defeats the callable-declaration probe),
+        # so "the function path gave up" is not evidence of a constant.
+        if self._cpp_declarator_is_function(declarator):
+            return False
+        name_node = declarator.child_by_field_name("declarator")
+        if name_node is None:
+            return False
+        if self._cpp_declarator_is_function(name_node):
+            return False
+        # A templated constant is `template_function` around the name
+        # (is_int_v<int>); unwrap so the specialization is not lost.
+        if name_node.type == "template_function":
+            inner = name_node.child_by_field_name("name")
+            if inner is not None:
+                name_node = inner
+        if name_node.type not in ("identifier", "qualified_identifier"):
+            return False
+        name = name_node.text.decode("utf-8", errors="replace")
+        # A name is an identifier: no whitespace, no template arguments,
+        # no punctuation. A defaulted template parameter reaches this path
+        # with the whole header as its text, and recording that produced a
+        # node that could not be merged or addressed.
+        if not name or not _CPP_IDENTIFIER_RE.fullmatch(name):
+            return False
+        qualified = self._qualify(name, file_path, enclosing_class)
+        nodes.append(NodeInfo(
+            kind="Type",
+            name=name,
+            file_path=file_path,
+            line_start=child.start_point[0] + 1,
+            line_end=child.end_point[0] + 1,
+            language=language,
+            parent_name=enclosing_class,
+            extra={"cpp_kind": "variable_template"},
+        ))
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=self._qualify(enclosing_class, file_path, None)
+            if enclosing_class
+            else file_path,
+            target=qualified,
+            file_path=file_path,
+            line=child.start_point[0] + 1,
+        ))
+        return True
+
     def _extract_functions(
         self,
         child,
@@ -11821,7 +11961,16 @@ class CodeParser:
         """
         name = self._get_name(child, language, "function")
         if not name:
-            return False
+            # A C++ declaration that is NOT callable is a variable
+            # template or a namespace-scope constant, e.g.
+            #   template <typename T> constexpr bool is_int_v = false;
+            # It reached this path because `declaration` is one of cpp's
+            # function node types, and _get_name rejected it for having no
+            # callable declarator. Record it instead of dropping it: these
+            # are the names concepts are written in terms of.
+            return self._extract_cpp_value_declaration(
+                child, language, file_path, nodes, edges, enclosing_class,
+            )
 
         # Go methods: attach to their receiver type as the enclosing class,
         # so `func (s *T) Foo()` becomes a member of T rather than a
