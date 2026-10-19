@@ -1,3 +1,119 @@
+# 结案：CALLS 未解析率不是缺陷（第 2 轮追加）
+
+> 上轮末尾留了一个开放项：10 个项目 CALLS 边未解析率 77–100%，
+> 其中 `has_value`(214)、`value`(204) 这类"同项目内重载方法"未解析，
+> 怀疑是可修缺陷。本轮深挖后结案：**不是缺陷**。
+
+## 调查过程
+
+### 第一步：确认解析器有没有接收者信息
+
+有。edge 的 extra 里存了 receiver：
+```
+L238 variant_impl.hpp  {"receiver": "a", ...}   target_resolution: unresolved
+```
+即 `a.has_value()` 里的 `a` 被记下来了，但没用于解析。
+
+进一步查：`receiver_binding` 字段**只有 Go 有**
+（`_go_receiver_binding_index`），C++ 完全没有接收者类型推断。
+而 graph.py 里消费这套证据的机制是齐的
+（`_receiver_evidence_admits_candidate`、`resolve_cpp_scoped_call_targets`），
+函数签名里也预留了 `cpp_scoped_target` 通道 —— 是 parser 侧没产出。
+
+### 第二步：先评估可行性，不急着写推断
+
+模板泛型场景下 receiver 是模板参数（`const Variant&` 里的 `Variant` 是模板
+参数名，不是具体类），不做实例化根本推不出类型。写了也是猜。
+
+### 第三步：修正统计口径，找到真正的疑点
+
+第一次统计把 `assert`/`memcpy`/`free` 这些**零节点**的目标误算成
+"名字唯一"（没排除 k == 0）。修正后：
+
+```
+repo                       no-node   1-node  overload
+bkthomps__Containers         2468     2004         0
+mariusbancila__stduuid       1580      723      1025
+foonathan__type_safe         2894      224      1124
+sheredom__utf8.h              718      289         0
+zserge__partcl                101       62         0
+Tencent__libco                334      139         2
+...
+TOTAL unresolved-but-single-node: 3584
+```
+
+3584 条边指向图里**唯一存在**的同名函数却未解析。看起来是缺陷。
+
+### 第四步：查具体案例，推翻假设
+
+`zserge__partcl` 的 `check_eval(x40)`：
+- 定义在 `tcl_test_subst.h`
+- 调用在 `tcl_test_flow.h`
+- `tcl_test_flow.h` **没有任何 IMPORTS_FROM 边**
+
+看源码确认：
+```c
+// tcl_test.c
+#include "tcl_test_lexer.h"
+#include "tcl_test_subst.h"
+#include "tcl_test_flow.h"     // 三者都被同一个 .c 统一 include
+#include "tcl_test_math.h"
+```
+`tcl_test_flow.h` 自己**没有** `#include "tcl_test_subst.h"`。
+这是 unity build 组织方式：头文件彼此依赖由外部统一的 .c 来 include。
+
+按插件的设计原则（docstring 原文）：
+> A globally unique name is not sufficient evidence: unrelated
+> repositories often contain one matching helper by coincidence. The
+> candidate must be in the call-site file or in exactly one file imported
+> by that file.
+
+**不解析是正确行为** —— 它宁可标 unresolved 也不猜。
+
+### 第五步：验证机制本身没坏
+
+如果机制正常，那么"图里有节点 + 有导入证据"的调用应该 100% 解析：
+
+```
+                        same-file        cross-file
+bkthomps__Containers    413/413 (100%)      0/0
+foonathan__type_safe    253/253 (100%)   18/18 (100%)
+mariusbancila__stduuid  595/595 (100%)  124/124 (100%)
+sheredom__utf8.h         62/62  (100%)     6/6  (100%)
+TartanLlama__optional   111/111 (100%)     2/2  (100%)
+Tencent__libco          127/127 (100%)      0/0
+zserge__partcl          298/298 (100%)      0/0
+rigtorp__MPMCQueue       18/18  (100%)      0/0
+rigtorp__SPSCQueue       16/16  (100%)      0/0
+-------------------------------------------------------
+TOTAL                  1893/1893 (100%)  150/150 (100%)
+```
+
+**凡是图里有节点、且有导入证据的调用，100% 都连上了，零漏判。**
+
+## 结论
+
+未解析的 4242 条（type_safe）分为：
+1. **目标在图里根本没有节点**（2894 条）：测试框架宏 REQUIRE/SECTION、
+   标准库 std::move/size、libc printf/memcpy/free —— 不该解析
+2. **有节点但缺导入证据**（1348 条）：unity-build 头文件之间没有 include 边，
+   或重载跨多个类无法确定是哪一个 —— 按设计原则不猜
+
+**不需要修。** 这个保守设计是对的：伪造调用边比留着 unresolved 危害大得多。
+
+## 顺带确认的能力缺口（未修，记录备查）
+
+C++ 侧没有产出 `receiver_binding`，只有 Go 有。graph.py 的消费机制是现成的，
+parser 侧补上 C++ 的接收者类型推断即可接上。但：
+- 模板泛型 receiver 推不出类型（`Variant` 是模板参数名）
+- 收益主要在有明确类类型的非模板代码上
+- 风险中等（可能引入错误归属）
+
+如果以后要动，判据是：只在该函数**非模板**、且 receiver 的声明类型能直接
+对应到一个已知 Class/Type 节点时才产出 binding。
+
+---
+
 # 第四批：C++ 类型别名（`using X = Y;`）不产生节点
 
 > 本文件按批倒序追加。最早的第一、二批在文末。
@@ -231,9 +347,12 @@ parser.py 作为基线，它含第一批、不含第三批。
 153 failed, 4115 passed
 ```
 失败数与上批完全一致（153），新增 6 个通过，零回归。
-
----
-
+
+
+---
+
+
+
 # 第三批：C++20 concept 与变量模板不产生节点
 
 > 本文件按顺序追加每批修复。前两批见下方历史段落。
