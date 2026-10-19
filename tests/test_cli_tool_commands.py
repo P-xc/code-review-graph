@@ -106,7 +106,12 @@ def test_tool_command_forwards_typed_arguments_as_json(
             cli.main()
 
     assert json.loads(capsys.readouterr().out) == result
-    tool.assert_called_once_with(repo_root=str(repo), **expected)
+    # db_path is forwarded when the graph lives outside the repo
+    # (CRG_DATA_DIR / --data-dir), so the ten graph-tool commands can
+    # actually read it instead of resolving an empty default.
+    tool.assert_called_once_with(
+        repo_root=str(repo), db_path=str(data_dir / "graph.db"), **expected
+    )
 
 
 @pytest.mark.parametrize(

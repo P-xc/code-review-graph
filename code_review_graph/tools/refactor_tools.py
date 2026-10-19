@@ -48,6 +48,7 @@ def refactor_func(
     repo_root: str | None = None,
     max_results: int = 50,
     detail_level: str = "standard",
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Unified refactoring entry point.
 
@@ -85,7 +86,7 @@ def refactor_func(
         }
     _validate_positive_int(max_results, "max_results")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         if mode == "rename":
             if not old_name or not new_name:

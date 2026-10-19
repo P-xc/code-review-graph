@@ -30,6 +30,7 @@ def list_flows(
     limit: int = 50,
     kind: str | None = None,
     detail_level: str = "standard",
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """List execution flows in the codebase, sorted by criticality.
 
@@ -52,7 +53,7 @@ def list_flows(
     """
     _validate_positive_int(limit, "limit")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         # Count every matching flow, then keep the bounded prefix — the same
         # "count all, return a prefix" contract query.py uses for max_results.
@@ -114,6 +115,7 @@ def get_flow(
     repo_root: str | None = None,
     max_steps: int = 50,
     max_source_lines: int = 400,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Get details of a single execution flow.
 
@@ -140,7 +142,7 @@ def get_flow(
     _validate_positive_int(max_steps, "max_steps")
     _validate_positive_int(max_source_lines, "max_source_lines")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         flow: dict | None = None
 

@@ -55,6 +55,7 @@ def list_communities_func(
     detail_level: str = "standard",
     max_results: int = 50,
     max_members: int = 10,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """List detected code communities in the codebase.
 
@@ -83,7 +84,7 @@ def list_communities_func(
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         communities, total, truncated = _bounded(
             get_communities(store, sort_by=sort_by, min_size=min_size),
@@ -128,6 +129,7 @@ def get_community_func(
     include_members: bool = False,
     repo_root: str | None = None,
     max_members: int = 25,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Get details of a single code community.
 
@@ -151,7 +153,7 @@ def get_community_func(
     """
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         community: dict | None = None
         all_communities = get_communities(store)
@@ -256,6 +258,7 @@ def get_architecture_overview_func(
     detail_level: str = "minimal",
     max_results: int = 100,
     max_members: int = 10,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Generate an architecture overview based on community structure.
 
@@ -285,7 +288,7 @@ def get_architecture_overview_func(
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         full_overview = get_architecture_overview(store)
         overview = full_overview

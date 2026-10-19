@@ -1,15 +1,17 @@
-# C/C++/Rust 解析修复 — 迁移案底
-
 > 这份文件是给「未来的我 / 另一个会话 / 另一台机器」看的。
 > 读完这份，不需要重跑任何调查就能接手。
 
 ## 一句话
 
-修了 `code-review-graph` 在 C/C++ 上的三个实测缺陷：函数签名套 Python 语法、
-struct 误判成 class 导致死代码假阳性、`#include` 从不解析导致跨文件影响面恒为 0。
+修了 `code-review-graph` 在 C/C++ 上的三类缺陷，以及一个让 19 个子命令读不到外部图的 CLI 缺陷。
 
 - 上游：`https://github.com/sumingwang233/code-review-graph` @ `6b12d11`（v2.3.9）
-- 本 fork 基线与上游一致，改动只在 `c-cpp-rust-parsing` 分支
+- 本 fork：`https://github.com/P-xc/code-review-graph`，分支 `c-cpp-rust-parsing`
+- PR：https://github.com/sumingwang233/code-review-graph/pull/1 → base `staging`
+
+---
+
+# 第一批：C/C++ 解析（commit c18ea3d）
 
 ## 被测项目
 
@@ -43,8 +45,7 @@ return_type = None
 
 - 渲染成 `class ProtobufCMessage`，不是 C
 - dead-code 把类型声明当成"无引用的 class" → **134 项**假阳性，
-  占该项目 dead-code 输出的绝大多数（全是 `ProtobufCAllocator`、
-  `ProtobufCMessage`、`ProtobufCType` 这类公开 struct）
+  占该项目 dead-code 输出的绝大多数
 
 ### 缺陷 3：跨文件影响面恒为 0
 
@@ -100,41 +101,130 @@ impact --files protobuf-c/protobuf-c.c
 | C 节点 `kind="Class"` | 39 | **0**（全转 Type） |
 | dead-code 总数 | 134 | **104**（剩的是 C++ 真 class + C static 函数） |
 | IMPORTS_FROM 裸字符串 | 98 | **0** |
-| 跨文件影响面 | 0 | **生效**（改 `protobuf-c.h` → 1 文件受影响） |
+| 跨文件影响面 | 0 | **生效** |
 
-## 测试
+---
+
+# 第二批：--data-dir 对 19 个子命令失效
+
+## 现象
+
+用外部目录建图后，绝大多数读命令**静默返回空**：
 
 ```
-153 failed, 4109 passed, 863 skipped
+$ build --repo <json-c> --data-dir F:\tmp\scan\x     # 645 节点
+$ status --repo <json-c> --data-dir F:\tmp\scan\x    # 645 节点  ✓
+$ search "json_object" --repo <json-c>               # Found 0, search_mode "none"
 ```
 
-**153 个失败全部是基线自带的**，与本次改动无关。验证方式：
-`git stash` 我的改动后跑基线，同样失败 13/15（Windows 路径、Unicode、
-skills 注入、d3 SRI 等环境问题）。我的改动**净减少 4 个失败**
-（2 个 struct 测试 + 2 个 postprocessing 签名测试），并**新增 11 个通过**。
+`search_mode: "none"` 是破绽：FTS 表不存在，因为**根本没图**。
+同一份图，`status` 答 645 节点，`search` 答 0，且都报 `status: "ok"`。
 
-基线失败集中在：`test_skills.py`（Unicode/文件模式）、`test_visualization.py`
-（d3 SRI）、`test_reconcile_orphan_purge.py`、`test_php_scoped_calls.py`、
-`test_registry_search_integration.py` —— 全是 Windows + 环境相关。
+## 根因（两层）
 
-## 复现环境（本机）
+1. **参数缺失**：29 个子命令只有 10 个声明了 `--data-dir`。
+   `search --data-dir X` 直接被拒：`unrecognized arguments`。
+2. **解析绕过**（真正的）：即使声明了参数也没用。`query/impact/search/flows/
+   flow/communities/community/architecture/large-functions/refactor` 这 10 个
+   在 `_GRAPH_TOOL_COMMANDS` 分支里**提前 return**，走自己的
+   `db_path = get_db_path(repo_root)` —— 永远解析到
+   `<repo>/.code-review-graph/graph.db`，完全不看 `--data-dir`。
+   而工具层 `_get_store(repo_root)` 也是 `get_db_path(root)`，
+   没有任何通道能传入外部路径。
+
+## 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `cli.py` | 给 15 个命令加 `--data-dir`（随后移除 install/init 两个，它们不读图）；`_data_dir_cmds` 白名单扩到 22 个；`_read_only_db_cmds` 扩到 19 个；`_GRAPH_TOOL_COMMANDS` 分支的 `db_path` 解析改为优先 `--data-dir`；`_run_graph_tool_command` 新增 `db_path` 形参并转发给 10 个工具调用 |
+| `tools/_common.py` | `_get_store` 新增可选 `db_path`（默认 None，26 处既有调用行为不变） |
+| `tools/query.py` | `query_graph` / `get_impact_radius` / `semantic_search_nodes` / `find_large_functions` 加 `db_path` 并转发 |
+| `tools/flows_tools.py` | `list_flows` / `get_flow` 同上 |
+| `tools/community_tools.py` | `list_communities_func` / `get_community_func` / `get_architecture_overview_func` 同上 |
+| `tools/refactor_tools.py` | `refactor_func` 同上 |
+| `tests/test_cli_tool_commands.py` | 期望调用里加 `db_path` |
+| `tests/test_tools.py`、`tests/test_agent_transparency.py` | 5 处 `_get_store` mock 的 lambda 加 `db_path=None` |
+
+### 设计决定
+
+**纯读命令绝不创建文件。** 显式 `--data-dir` 直接当路径用，不 `mkdir`、
+不建 registry 条目；图不存在就报错，绝不静默造一个空库
+（延续 #777 / #782 / #803 的约定）。
+
+**`_get_store` 用可选参数而非必填。** 26 处既有调用一行不改，
+只有 CLI 传值，风险面最小。
+
+## 修后实测（json-c，图在 `F:\tmp\scan\jsoncjsonc01820240915`）
+
+| 命令 | 修前 | 修后 |
+|---|---|---|
+| search | 0（mode=none） | **20**（mode=fts） |
+| flows | 0 | **91** |
+| communities | 0 | **23** |
+| architecture | 0 communities | **23 communities** |
+| large-functions | 0 | **50** |
+| query | not_found | **17 候选（正常消歧）** |
+
+---
+
+# 9 个 C/C++ 项目扫描验证
+
+`F:\vsProject` 下 9 个项目全部建图成功：
+
+| 项目 | 文件 | 节点 | 边 | return_type 解析率 | 假 `def` 签名 |
+|---|---|---|---|---|---|
+| json-c 0.18 | 83 | 1166 | 8994 | 99% | 0 |
+| liquibook | 66 | 889 | 9064 | 73% | 0 |
+| struct2json 1.0.4 | 10 | 87 | 379 | 100% | 0 |
+| lolskin (R3nzSkin) | 65 | 3588 | 20737 | 93% | 0 |
+| Valorant SkinChanger | 64 | 10743 | 21704 | 95% | 0 |
+| Orbitex | 30 | 2701 | 14995 | 94% | 0 |
+| MFCApplication | 9 | 35 | 100 | 61% | 0 |
+| MFCApplication1 | 9 | 35 | 100 | 61% | 0 |
+| MFCApplication2 | 9 | 37 | 104 | 65% | 0 |
+
+未解析的 `IMPORTS_FROM` 全部是系统头（`stdio.h`/`assert.h`/`errno.h`）——
+**正确行为**，它们不是仓库内节点。
+
+## 扫描时踩的坑
+
+**项目必须有根目录标记。** 只有 `protobuf-c`、`AduSkin` 等少数有 `.git`。
+其余项目要先建 `.code-review-graph/` 空目录，否则
+`ValueError: repo_root does not look like a project root`。
+已在 9 个项目下建了这个目录（只是标记，不含数据）。
+
+**dead-code 会被 `build/`、`doc/`、第三方库污染。** 首次扫 json-c 时
+结果里混进 `doc/html/jquery.js`、`build/CMakeFiles/...`。
+扫自有代码前先排除这些目录。
+
+**FTS 是跨列匹配。** `search "main"` 在 Valorant 项目返回 3539 个
+（= 全部节点），因为 `file_path` 里含项目名 `...-main`。
+这不是 bug，但短词搜索要看 `qualified_name` 而不是总数。
+
+---
+
+# 复现环境（本机）
 
 **GitHub 直连不通。** `https://github.com` 443 被 reset，
 `git@github.com` SSH:443 握手后 reset，HTTP 代理写死
 `127.0.0.1:7890`（Clash）但没开。
 
-**可用通道：镜像 + 已存凭据。**
-```bash
-git clone https://ghfast.top/https://github.com/sumingwang233/code-review-graph.git
-# 或 https://gh-proxy.com/https://github.com/...
-# 凭据在 ~/.git-credentials（git credential.helper=store），用户名 P-xc
-```
-已把 `http.https://github.com.proxy` 从 global config 删掉。
+**可用通道**：
+- `git clone` → 镜像：`https://ghfast.top/https://github.com/...`
+  或 `https://gh-proxy.com/https://github.com/...`
+  （**镜像只读，`git push` 静默失败且不报错**）
+- `api.github.com` → **直连 200 可用**。所以 fork、push、开 PR 全走 REST API：
+  建 fork 用 `POST /repos/{owner}/{repo}/forks`；
+  push 用 `git/blobs` → `git/trees` → `git/commits` → `git/refs` 四步，
+  tree sha 与本地一致即成功。凭据在 `~/.git-credentials`
+  （`git credential.helper=store`），用户名 `P-xc`。
+- 已把 `http.https://github.com.proxy` 从 global config 删掉。
 
 **Python 引擎在 F 盘。** C 盘当时只剩 28MB，装不下 327MB 的依赖：
 ```
-F:\tmp\crg-engine         venv，code-review-graph 2.3.9
-F:\tmp\crg-data           graph.db（测试产物）
+F:\tmp\crg-engine         venv，code-review-graph 2.3.9，以 -e 装到 F:\tmp\crg-fork
+F:\tmp\crg-fork           修改中的源码（分支 c-cpp-rust-parsing）
+F:\tmp\scan\<project>     各项目扫描产物 graph.db
 C:\Users\Administrator\AppData\Roaming\dsh-desktop\harness\code-review-graph\engine
   ⇢ junction 指向 F:\tmp\crg-engine（DSH 插件按 $DSH_HOME 硬编码找引擎）
 ```
@@ -143,14 +233,41 @@ C:\Users\Administrator\AppData\Roaming\dsh-desktop\harness\code-review-graph\eng
 （`git@github.com` 被 reset 直接失败）。手工复制包 + 依赖进
 `profiles/web/node_modules/` 可行。
 
-**文件是 CRLF。** `parser.py` 等全部 CRLF 行尾，用普通文本替换工具会
-匹配失败。上面所有改动都用 `newline=""` 的 Python 脚本做的。
+**文件是 CRLF。** `parser.py`、`cli.py` 等全部 CRLF 行尾，用普通文本替换工具会
+匹配失败。所有改动都用 `newline=""` 的 Python 脚本做的。
+写这类脚本时**带变量名**做替换锚点——第一版漏了接收者，生成了 15 个裸
+`add_argument(...)`，CLI 启动时必 NameError。
 
-## 还没做的
+---
 
-- **Rust 只做了顺带确认**，没有专门修。`_CLASS_TYPES["rust"]` 已经是
+# 测试状态
+
+```
+153 failed, 4109 passed, 863 skipped
+```
+
+**153 个失败全部是基线自带的**，与改动无关。验证方式：`git stash` 后跑基线，
+同一批测试同样失败（Windows 路径分隔符、`/` vs `\`、Unicode、skills 注入、
+d3 SRI 等环境问题）。
+
+几个已确认的基线失败组：
+- `tests/test_skills.py` — Unicode / 文件模式
+- `tests/test_visualization.py` — d3 SRI 校验
+- `tests/test_reconcile_orphan_purge.py`、`test_php_scoped_calls.py`
+- `tests/test_agent_transparency.py::TestSymbolDisambiguation` — 9 个，路径分隔符
+- `tests/test_cli.py::TestGraphToolExplicitRepoResolution` — 1 个
+
+第一批改动净减 4 个失败、新增 11 个通过；第二批零新增。
+
+---
+
+# 还没做的
+
+- **Rust 只做了顺带确认，没有专门修。** `_CLASS_TYPES["rust"]` 已是
   `struct_item/enum_item/trait_item`（合理），`_FUNCTION_TYPES` 有
-  `function_item`。Rust 项目未实测。
+  `function_item`。**Rust 项目未实测。**
 - C++ 模板、宏、`#ifdef` 分支里的定义仍未处理。
-- 37/424 个 C/C++ 函数仍无 return_type —— 多为 K&R 风格或宏生成的定义。
-- `impact` 深度仍是默认 2 跳；protobuf-c 这种扁平项目跨文件依赖本来就稀疏。
+- 各项目仍有 0–27% 的 C/C++ 函数没有 return_type（K&R 风格或宏生成）。
+- `impact` 深度仍是默认 2 跳；扁平项目（protobuf-c）跨文件依赖本来就稀疏。
+- C/C++ 的 `CALLS` 边 unresolved 率 51–100%（MFC 三个是 100%），
+  未深入排查——可能与宏、函数指针、COM/MFC 消息映射有关。

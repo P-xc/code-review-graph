@@ -209,6 +209,7 @@ def get_impact_radius(
     base: str = "HEAD~1",
     detail_level: str = "standard",
     resolution: str = RESOLUTION_ALL,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Analyze the blast radius of changed files.
 
@@ -238,7 +239,7 @@ def get_impact_radius(
             f"resolution must be one of {list(IMPACT_RESOLUTIONS)}, got {resolution!r}"
         )
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         if changed_files is None:
             changed_files, base = discover_review_changes(root, base)
@@ -437,6 +438,7 @@ def query_graph(
     detail_level: str = "standard",
     max_results: int = 100,
     resolution: str = RESOLUTION_ALL,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -469,7 +471,7 @@ def query_graph(
             f"resolution must be one of {list(QUERY_RESOLUTIONS)}, got {resolution!r}"
         )
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         if pattern not in _QUERY_PATTERNS:
             return {
@@ -1120,6 +1122,7 @@ def semantic_search_nodes(
     model: str | None = None,
     provider: str | None = None,
     detail_level: str = "standard",
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Search for nodes by name, keyword, or semantic similarity.
 
@@ -1139,7 +1142,7 @@ def semantic_search_nodes(
     Returns:
         Ranked list of matching nodes.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         mode_out: list[str] = []
         results = hybrid_search(
@@ -1285,6 +1288,7 @@ def find_large_functions(
     file_path_pattern: str | None = None,
     limit: int = 50,
     repo_root: str | None = None,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -1301,7 +1305,7 @@ def find_large_functions(
     Returns:
         Oversized nodes with line counts, ordered largest first.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, db_path=db_path)
     try:
         nodes = store.get_nodes_by_size(
             min_lines=min_lines,

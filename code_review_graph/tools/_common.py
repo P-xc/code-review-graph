@@ -205,8 +205,16 @@ def _resolve_root(repo_root: str | None = None) -> Path:
     return _validate_repo_root(Path(repo_root)) if repo_root else find_project_root()
 
 
-def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
+def _get_store(
+    repo_root: str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[GraphStore, Path]:
     """Resolve repo root and open the graph store.
+
+    *db_path* names the graph file explicitly. It exists because a
+    graph may be stored outside the repository (`build --data-dir`),
+    and the default resolution cannot find one that is. Callers that
+    omit it keep the established behaviour.
 
     Callers own the returned store and must close it (try/finally or
     context manager) to avoid leaking SQLite file descriptors.
@@ -219,7 +227,10 @@ def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
     from ..incremental import assert_graph_serves_root
 
     root = _resolve_root(repo_root)
-    db_path = get_db_path(root)
+    if db_path is None:
+        db_path = get_db_path(root)
+    else:
+        db_path = Path(db_path)
     store = GraphStore(db_path)
     try:
         assert_graph_serves_root(root, store)
