@@ -11722,8 +11722,21 @@ class CodeParser:
         if docstring:
             extra["docstring"] = docstring
 
+        # A C struct/enum/union/typedef is a TYPE, not a class: it has no
+        # methods, no inheritance and no instances. Emitting it as "Class"
+        # fed the dead-code analysis type declarations it reads as
+        # unreferenced classes, so every header struct was reported dead.
+        node_kind = "Class"
+        if language in ("c", "cpp"):
+            extra["c_kind"] = child.type
+            if child.type in (
+                "struct_specifier", "union_specifier",
+                "enum_specifier", "type_definition",
+            ):
+                node_kind = "Type"
+
         node = NodeInfo(
-            kind="Class",
+            kind=node_kind,
             name=name,
             file_path=file_path,
             line_start=child.start_point[0] + 1,
@@ -15719,6 +15732,9 @@ class CodeParser:
             # ``dart:core`` / ``dart:async`` etc. are SDK libraries we do
             # not track; fall through to return None.
 
+        if language in ("c", "cpp"):
+            return self._resolve_c_cpp_include(module, file_path, form)
+
         elif language == "rust":
             return self._resolve_rust_module_file(module, file_path)
 
@@ -15833,6 +15849,66 @@ class CodeParser:
     # the case-exact probes, and `_path_is_within` is the repository clamp
     # that Python, Rust and PHP already apply.
     # ------------------------------------------------------------------
+
+    def _resolve_c_cpp_include(
+        self, module: str, file_path: str, form: Optional[str] = None,
+    ) -> Optional[str]:
+        """Resolve a C/C++ ``#include`` to a header inside this repo.
+
+        *form* is ``"quote"`` (``#include "x.h"``) or ``"angle"``
+        (``#include <x.h>``). The quote form searches the including
+        file's own directory first; both then walk ancestor directories
+        up to the repository root. That is the order a compiler uses, so
+        a local header shadows a same-named one further up exactly as it
+        does at build time, and ``protobuf-c.c`` finds the sibling
+        ``protobuf-c.h`` while ``protoc-c/*.cc`` still reaches
+        ``protobuf-c/protobuf-c.h`` from two levels away.
+
+        Only files inside the repository are returned. ``<stdio.h>``
+        and every other system or third-party header stays unresolved
+        and keeps its bare string, which is what the edge already did.
+        """
+        if not module or "\n" in module:
+            return None
+        norm = module.replace("\\", "/").lstrip("./")
+        if not norm or not norm.endswith((
+            ".h", ".hpp", ".hh", ".hxx", ".inl", ".ipp",
+            ".c", ".cc", ".cpp", ".cxx", ".tcc",
+        )):
+            return None
+        try:
+            caller_dir = Path(file_path).resolve().parent
+        except (OSError, ValueError):
+            return None
+        boundary = self._repo_root
+        if boundary is not None:
+            try:
+                boundary = boundary.resolve()
+            except (OSError, ValueError):
+                boundary = None
+
+        # Only descend while inside the repo; a sibling directory of the
+        # root is another checkout, not an include path of this one.
+        current = caller_dir
+        if boundary is not None and not _path_is_within(current, boundary):
+            return None
+        while True:
+            try:
+                target = (current / norm).resolve()
+            except (OSError, ValueError):
+                target = None
+            if (
+                target is not None
+                and target.is_file()
+                and (boundary is None or _path_is_within(target, boundary))
+            ):
+                return str(target)
+            if current == current.parent:
+                break
+            if boundary is not None and current == boundary:
+                break
+            current = current.parent
+        return None
 
     def _parts_within(
         self, base: Path, relative: str, boundary: Path,
@@ -17753,6 +17829,14 @@ class CodeParser:
 
     def _get_params(self, node, language: str, source: bytes) -> Optional[str]:
         """Extract parameter list as a string."""
+        # C/C++: the parameter_list sits inside a (possibly nested)
+        # declarator, never adjacent to the definition node, so the
+        # flat scan below never sees it -- which is why every C/C++
+        # function signature rendered as the Python form `def f()`.
+        if language in ("c", "cpp"):
+            found = self._c_cpp_parameter_list(node)
+            if found is not None:
+                return found
         for child in node.children:
             param_types = (
                 "parameters", "formal_parameters",
@@ -17773,6 +17857,10 @@ class CodeParser:
 
     def _get_return_type(self, node, language: str, source: bytes) -> Optional[str]:
         """Extract return type annotation if present."""
+        if language in ("c", "cpp"):
+            found = self._c_cpp_return_type(node)
+            if found:
+                return found
         for child in node.children:
             if child.type in ("type", "return_type", "type_annotation", "return_type_definition"):
                 return child.text.decode("utf-8", errors="replace")
@@ -17782,6 +17870,69 @@ class CodeParser:
                 if child.type == "->" and i + 1 < len(node.children):
                     return node.children[i + 1].text.decode("utf-8", errors="replace")
         return None
+
+    def _c_cpp_parameter_list(self, node) -> Optional[str]:
+        """The parameter list of a C/C++ function, however deeply nested.
+
+        tree-sitter-c puts ``parameter_list`` under a ``function_declarator``,
+        which may itself sit under ``pointer_declarator`` chains, so a flat
+        child scan of the definition node never reaches it. Depth-first with a
+        bounded stack, stopping at the first declarator so a nested function
+        pointer parameter cannot donate its own parameter list.
+        """
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            for child in current.children:
+                if child.type == "parameter_list":
+                    return child.text.decode("utf-8", errors="replace")
+                if child.type in (
+                    "function_declarator", "pointer_declarator",
+                    "parenthesized_declarator", "array_declarator",
+                    "reference_declarator", "declaration",
+                    "function_definition",
+                ):
+                    stack.append(child)
+        return None
+
+    def _c_cpp_return_type(self, node) -> Optional[str]:
+        """The declared return type of a C/C++ function.
+
+        It is the span before the declarator: every child up to the first
+        declarator, minus storage-class and qualifier keywords. ``static``,
+        ``inline``, ``const`` and ``extern`` are not part of the type; the
+        pointer/reference markers are, so `const char *` keeps its ``*``.
+        """
+        declarator_types = frozenset({
+            "function_declarator", "pointer_declarator",
+            "parenthesized_declarator", "array_declarator",
+            "reference_declarator", "init_declarator",
+        })
+        # `const` / `volatile` are qualifiers, but they modify the
+        # RETURNED type in C (`const char *`), not the function, so
+        # they must be kept -- unlike the storage class above.
+        drop_types = frozenset({
+            "storage_class_specifier",
+            "attribute_specifier", "ms_call_modifier",
+        })
+        parts: list[str] = []
+        for child in node.children:
+            if child.type in declarator_types:
+                # A pointer_declarator carries the `*` of the return
+                # type as anonymous children. Collect them, but stop
+                # before its own identifier.
+                if child.type == "pointer_declarator":
+                    for sub in child.children:
+                        if sub.is_named:
+                            break
+                        parts.append(sub.text.decode("utf-8", errors="replace"))
+                break
+            if child.type in drop_types or not child.is_named:
+                continue
+            parts.append(child.text.decode("utf-8", errors="replace"))
+        if not parts:
+            return None
+        return " ".join(parts).strip() or None
 
     def _get_bases(self, node, language: str, source: bytes) -> list[str]:
         """Extract base classes / implemented interfaces."""
@@ -18129,10 +18280,23 @@ class CodeParser:
         if language == "ruby":
             return self._extract_ruby_import_specs(node)
         line = node.start_point[0] + 1
-        return [
-            _ImportSpec(module, line)
-            for module in self._extract_import(node, language, source, file_path)
-        ]
+        modules = self._extract_import(node, language, source, file_path)
+        if language in ("c", "cpp"):
+            # `#include "a.h"` and `#include <b.h>` resolve differently,
+            # so the keyword has to reach the resolver the way Ruby's
+            # require/require_relative does.
+            forms: list[str] = []
+            for child in node.children:
+                if child.type == "system_lib_string":
+                    forms.append("angle")
+                elif child.type == "string_literal":
+                    forms.append("quote")
+            specs: list[_ImportSpec] = []
+            for i, module in enumerate(modules):
+                form = forms[i] if i < len(forms) else None
+                specs.append(_ImportSpec(module, line, form))
+            return specs
+        return [_ImportSpec(module, line) for module in modules]
 
     def _extract_import(
         self,
@@ -18143,6 +18307,8 @@ class CodeParser:
     ) -> list[str]:
         """Extract import targets as module/path strings."""
         imports = []
+        # Parallel to *imports*: the include form for C/C++ (see below).
+        forms: list[str] = []
         text = node.text.decode("utf-8", errors="replace").strip()
 
         if language == "python":
@@ -18197,6 +18363,13 @@ class CodeParser:
                 if child.type in ("system_lib_string", "string_literal"):
                     val = child.text.decode("utf-8", errors="replace").strip("<>\"")
                     imports.append(val)
+                    # The form IS the search order: `"x.h"` starts at the
+                    # including file's own directory, `<x.h>` does not.
+                    forms.append(
+                        "angle"
+                        if child.type == "system_lib_string"
+                        else "quote"
+                    )
         elif language in ("java", "csharp"):
             # import/using package.Class
             parts = text.split()
