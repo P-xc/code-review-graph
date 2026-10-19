@@ -1179,7 +1179,14 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # templates the way an interface constrains implementors, so it needs
     # a node the way TS interface_declaration does (#737). Without it a
     # constrained template cannot be traced back to what constrains it.
-    "cpp": ["class_specifier", "struct_specifier", "concept_definition"],
+    # alias_declaration is the name a codebase actually uses for a type:
+    # `using int_t = integer<int>;` had no node at all, so the 159 calls
+    # against int_t in type_safe stayed unresolved and neither "what is
+    # int_t" nor "where is it used" had an answer.
+    "cpp": [
+        "class_specifier", "struct_specifier",
+        "concept_definition", "alias_declaration",
+    ],
     "csharp": [
         "class_declaration", "interface_declaration",
         "enum_declaration", "struct_declaration",
@@ -11743,7 +11750,7 @@ class CodeParser:
             if child.type in (
                 "struct_specifier", "union_specifier",
                 "enum_specifier", "type_definition",
-                "concept_definition",
+                "concept_definition", "alias_declaration",
             ):
                 node_kind = "Type"
 

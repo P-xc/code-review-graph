@@ -1,3 +1,239 @@
+# 第四批：C++ 类型别名（`using X = Y;`）不产生节点
+
+> 本文件按批倒序追加。最早的第一、二批在文末。
+
+## 触发场景
+
+第三批做完 concept / 变量模板后，回头量了 10 个 clone 项目的 `CALLS` 边未解析率，
+想看看剩下的 unresolved 里有没有可修的真缺陷：
+
+```
+type_safe       unres=4614/4926 (93%)   top: REQUIRE 1368, SECTION 216,
+                                             has_value 214, value 204, int_t 159
+optional        unres=1158/1271 (91%)   top: REQUIRE 366, has_value 53, ...
+```
+
+大部分是**不该解析**的：测试框架宏（REQUIRE/SECTION/ASSERT_EQ）、标准库
+（std::move / size / push_back）、C 库函数（printf / memcpy / free）。
+
+但 `int_t`(159)、`uint_t`(88) 是 **type_safe 自己的类型别名**，项目里有定义、
+被大量调用，却完全没有节点。
+
+## 缺陷
+
+`alias_declaration` 在 parser 里只出现在 `_CPP_HEADER_EVIDENCE_TYPES` ——
+那个集合的用途是判断 `.h` 是 C 还是 C++，**从不用来建节点**。
+与第三批的 concept 完全同一个病。
+
+统计这 10 个项目里的别名数量：
+
+```
+foonathan__type_safe     321
+mariusbancila__stduuid    93
+TartanLlama__optional     40
+rigtorp__SPSCQueue         1
+                       ------
+                         455
+```
+
+455 个类型别名全部无节点。别名是代码库**实际使用的类型名**，
+没有它既答不了"int_t 是什么"，也找不到"谁在用 int_t"。
+
+## 改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `_CLASS_TYPES["cpp"]` | 加 `alias_declaration` |
+| `_extract_classes` | cpp 的 struct/union/enum/typedef/concept/**alias** 发 `kind="Type"`，留 `extra["cpp_kind"]="alias_declaration"` |
+
+**这次不需要第三批那三个守卫**：`alias_declaration` 不是 `declaration`，
+不会进 `_FUNCTION_TYPES` 的函数路径，而且它的名字只有一个 `type_identifier`
+子节点——不存在"证明不是函数"或"名字畸形"的问题。
+
+## 修后实测（10 个项目）
+
+Function 数**全部与基线一致**，Type 大幅增加：
+
+| 项目 | Type 基线 → 修后 | 新增 |
+|---|---|---|
+| type_safe | 154 → **402** | **+248** |
+| stduuid | 173 → **265** | +92 |
+| optional | 46 → **79** | +33 |
+| MPMCQueue | 4 → 7 | +3 |
+| SPSCQueue | 5 → 6 | +1 |
+| utf8.h | 7 → 8 | +1 |
+| Seqlock / partcl / libco / Containers | 不变 | 0 |
+
+节点确认（type_safe）：
+```
+Type  int_t    types.hpp:189   {"cpp_kind": "alias_declaration"}
+Type  uint_t   types.hpp:190   {"cpp_kind": "alias_declaration"}
+Type  size_t   types.hpp:186   {"cpp_kind": "alias_declaration"}
+```
+
+## 一个诚实的边界
+
+`int_t` 的 **CALLS 边仍然未解析**。原因合理：别名不是函数，
+`int_t(...)` 实际是构造函数调用，而 CALL 解析只连 Function 节点。
+未解析率 93% → 86%，改善有限但节点本身现在可查询、可导航了。
+
+## 测试
+
+`tests/test_cpp_type_alias.py`（7 个）+ fixture `tests/fixtures/cpp_type_alias/sample.cpp`：
+- 命名空间作用域别名（`using int_t = integer<int>;`）
+- 别名到基本类型、别名模板（`template <typename T> using ptr = T*;`）
+- 嵌套 namespace 内的别名
+- **类成员别名**（`struct Wrapper { using value_type = int; }`）
+- 别名不得挤掉普通函数、不得改变类的 kind
+
+## 测试状态
+
+```
+153 failed, 4122 passed
+```
+失败数与第三批完全一致（153），新增 7 个通过，零回归。
+
+---
+
+# 第三批：C++20 concept 与变量模板不产生节点
+
+## 触发场景
+
+从桌面清单 `C++开源项目研读清单100个.md`（117 条）里按 API 体积挑出 10 个最小
+的 C/C++ 仓库 clone 到 `F:\vsProject`，逐个建图后写了一个 C++11–20 语法探针
+`F:\tmp\cpp_probe\modern_cpp.cpp` 压解析器，发现 C++20 的两个核心特性完全没有节点。
+
+## 缺陷 1：concept 不产生节点
+
+```
+template <typename T> concept Integral = is_int_v<T>;
+template <Integral T> T clamp_value(T v, T lo, T hi);
+```
+
+`Integral` 在图里**不存在**。
+
+`concept_definition` 在 parser 里只出现在 `_CPP_HEADER_EVIDENCE_TYPES` ——
+那个集合的用途是判断 `.h` 是 C 还是 C++，**从不用来建节点**。
+
+后果：被约束的函数能找到，约束它的 concept 找不到。"这个模板要求什么"无法回答，
+`requires_clamp` 无法追溯到 `Integral`。
+
+## 缺陷 2：变量模板被丢弃
+
+```
+template <typename T> constexpr bool is_int_v = false;   -> 无节点
+template <> constexpr bool is_int_v<int> = true;         -> 无节点
+```
+
+走的路径不同：解析成 `template_declaration > declaration > init_declarator > identifier`，
+而 `declaration` 在 cpp 的 `_FUNCTION_TYPES` 里，于是被送到 `_extract_functions`。
+那里 `_get_name` 调 `_cpp_is_callable_declaration`，`init_declarator` 不是 callable
+→ 返回 None → 节点被丢弃，什么都没记下。
+
+讽刺的是：concept 就算修好了能建节点，它引用的 `is_int_v` 仍然不存在，约束照样无法解析。
+
+## 改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `_CLASS_TYPES["cpp"]` | 加 `concept_definition` |
+| `_extract_classes` | cpp/c 的 struct/union/enum/typedef/**concept** 发 `kind="Type"`，留 `extra["cpp_kind"]` |
+| `_extract_functions` | `_get_name` 返回 None 时改调新增的 `_extract_cpp_value_declaration` |
+| 新增 `_extract_cpp_value_declaration` | 收变量模板/命名空间常量，发 `kind="Type"` + `extra["cpp_kind"]="variable_template"` |
+| 新增 `_cpp_declaration_is_local` | 父链上有 function_definition/lambda/compound_statement 就跳过 |
+| 新增 `_cpp_has_const_qualifier` | 要求 constexpr/constinit/const |
+| 新增 `_cpp_declarator_is_function` | declarator 链含 function_declarator/parameter_list 就不收 |
+| 新增模块级 `_CPP_IDENTIFIER_RE` | 名字必须是合法标识符 |
+
+## 三个必须同时存在的守卫（都是踩出来的）
+
+### 守卫 1：排除函数内局部变量
+第一版把 `void f() { int total = 0; }` 里的 `total`、`i` 以及 main 里所有局部变量
+都标成了 `variable_template`。walker **会递归进函数体**，我原先假设它只在顶层派发——错的。
+修：`_cpp_declaration_is_local` 检查父链。
+
+### 守卫 2：必须证明「不是函数」才收
+加了守卫 1 之后，`tl::optional` 的 **41 个方法全部消失**（map / and_then /
+transform / or_else / map_or），整个 monadic 接口没了。
+
+这些方法的形状是：
+```cpp
+template <class F>
+TL_OPTIONAL_11_CONSTEXPR decltype(optional_map_impl(std::declval<optional &>(), ...))
+map(F &&f) & { ... }
+```
+在 `template_declaration` 里 + 带 constexpr → 我的守卫放行；
+而 `_get_name` 对它们**本来就会返回 None**（尾置 ref-qualifier + decltype 返回
+让 callable 探测失败），于是被我当成常量收走。
+
+**教训：`_get_name` 失败不等于"这是常量"。** 修：`_cpp_declarator_is_function`
+主动检查 declarator 链，是函数就让路。
+
+### 守卫 3：名字必须是合法标识符
+修完守卫 2 后仍掉 41 个。抓到一个名字是**整个模板头**的节点：
+```
+"template <\r\n      class U = T,\r\n      detail::enable_if_t<...>"
+```
+来自默认模板参数——`declarator` 字段取到的是参数列表不是 identifier。
+
+单独 parse 时 226 个 Function 全在，但 build 合并后只剩 224：名字不是标识符
+就没法当稳定的合并键，把兄弟节点一起拖掉了。修：`_CPP_IDENTIFIER_RE.fullmatch`。
+
+## 修后实测
+
+### 语法探针 `F:\tmp\cpp_probe\modern_cpp.cpp`
+| | 修前 | 修后 |
+|---|---|---|
+| `Integral`（concept） | 缺失 | **Type @ L62** |
+| `is_int_v`（变量模板） | 缺失 | **Type @ L47** |
+| 局部变量 total/i/a/h/... | — | **全部 clean**（未被误收） |
+| 总节点 | 26 | **28**（只多该多的 2 个） |
+
+### 10 个 clone 项目（对照基线 = 第一批修复后的 parser.py）
+Function 数**全部与基线一致**，只新增该增的 Type：
+
+| 项目 | Function 基线/修后 | 新增 variable_template |
+|---|---|---|
+| Seqlock | 5 / 5 | 0 |
+| partcl | 42 / 42 | 0 |
+| MPMCQueue | 28 / 28 | 1 |
+| SPSCQueue | 23 / 23 | 0 |
+| libco | 151 / 151 | 0 |
+| utf8.h | 93 / 93 | 0 |
+| stduuid | 1703 / 1703 | 17 |
+| optional | 265 / 265 | 4 |
+| Containers | 373 / 373 | 0 |
+| type_safe | 907 / 907 | 5 |
+
+concept 全是 0 —— 这 10 个项目是 C++11/14/17，本来就没用 C++20 concept，符合预期。
+
+## 对比方法（重要，我在这栽过）
+
+**不能用 `git stash` 整个 parser.py 当基线** —— parser.py 同时含第一批（struct→Type）
+和第三批改动，stash 会把两批一起去掉，得出假的"节点数变化"。
+
+正确做法：`git show c18ea3d:code_review_graph/parser.py` 取出第一批提交时的
+parser.py 作为基线，它含第一批、不含第三批。
+
+## 新增测试
+
+`tests/test_cpp20_concepts.py`（6 个）+ fixture `tests/fixtures/cpp_cpp20_concepts/sample.cpp`：
+- concept 产生节点且 kind=Type
+- 变量模板产生节点
+- 被约束的函数仍是 Function
+- **尾置 ref-qualifier 的成员方法不被当成变量模板**（守卫 2 的回归测试）
+- 普通方法不受影响
+- **没有任何节点的名字是畸形**（守卫 3 的回归测试）
+
+## 测试状态
+
+```
+153 failed, 4115 passed
+```
+失败数与上批完全一致（153），新增 6 个通过，零回归。
+
+---
+
 # 第三批：C++20 concept 与变量模板不产生节点
 
 > 本文件按顺序追加每批修复。前两批见下方历史段落。
@@ -162,9 +398,12 @@ libco 0.19MB。
 `catch/catch.hpp` 单文件就 1891 个节点。`utf8.h` 的 `test/utest.h` 同理。
 扫自有代码前要排除 `vendor/`、`test/`、`catch/` 这类第三方头，否则
 dead-code 和大函数统计全是噪声。
-
----
-
+
+
+---
+
+
+
 > 这份文件是给「未来的我 / 另一个会话 / 另一台机器」看的。
 > 读完这份，不需要重跑任何调查就能接手。
 
