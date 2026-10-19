@@ -167,7 +167,10 @@ class TestTools:
         store.commit()
         rebuild_fts_index(store)
 
-        monkeypatch.setattr(query_mod, "_get_store", lambda repo_root=None: (store, tmp_path))
+        monkeypatch.setattr(
+            query_mod, "_get_store",
+            lambda repo_root=None, db_path=None: (store, tmp_path),
+        )
         result = semantic_search_nodes("login")
         assert result["status"] == "ok"
         assert result["search_mode"] == "fts"
@@ -1139,7 +1142,7 @@ class TestEmbedGraphProviderErrors:
         (tmp_path / ".code-review-graph").mkdir()
         store = MagicMock()
         monkeypatch.setattr(
-            docs_module, "_get_store", lambda repo_root=None: (store, tmp_path),
+            docs_module, "_get_store", lambda repo_root=None, db_path=None: (store, tmp_path),
         )
         result = docs_module.embed_graph(
             repo_root=str(tmp_path), provider="moonbase",
@@ -2898,7 +2901,7 @@ def test_impact_radius_tool_exposes_best_first_scores(monkeypatch, tmp_path):
     store.commit()
 
     monkeypatch.setattr(
-        query_module, "_get_store", lambda _repo_root: (store, tmp_path),
+        query_module, "_get_store", lambda _repo_root, db_path=None: (store, tmp_path),
     )
     monkeypatch.setattr(
         query_module,

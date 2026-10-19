@@ -526,8 +526,11 @@ class TestCParsing:
         assert self.parser.detect_language(Path("main.c")) == "c"
 
     def test_finds_structs(self):
-        classes = [n for n in self.nodes if n.kind == "Class"]
-        names = {c.name for c in classes}
+        # A C struct is a Type, not a Class: emitting it as "Class"
+        # made dead-code report every header struct as an
+        # unreferenced class. See the C/C++ type fix.
+        types = [n for n in self.nodes if n.kind == "Type"]
+        names = {t.name for t in types}
         assert "User" in names
 
     def test_finds_functions(self):
@@ -541,6 +544,24 @@ class TestCParsing:
         imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
         targets = {e.target for e in imports}
         assert "stdio.h" in targets
+
+    def test_c_function_signature_is_not_python(self):
+        """params/return_type were NULL, so every C signature rendered
+        as the Python form `def name()`."""
+        by_name = {n.name: n for n in self.nodes if n.kind == "Function"}
+        create = by_name["create_user"]
+        assert create.return_type is not None
+        assert "User" in create.return_type
+        assert create.params is not None
+        assert "int id" in create.params
+
+    def test_c_struct_is_not_a_class(self):
+        """A C typedef struct has no methods or inheritance; calling it
+        a Class fed dead-code analysis a false unreferenced type."""
+        assert not [n for n in self.nodes if n.kind == "Class"]
+        types = [n for n in self.nodes if n.kind == "Type"]
+        assert types
+        assert all(t.extra.get("c_kind") for t in types)
 
 
 class TestCppParsing:
@@ -2250,8 +2271,8 @@ class TestXSParsing:
         assert self.parser.detect_language(Path("MyModule.xs")) == "c"
 
     def test_finds_structs(self):
-        classes = [n for n in self.nodes if n.kind == "Class"]
-        names = {c.name for c in classes}
+        types = [n for n in self.nodes if n.kind == "Type"]
+        names = {t.name for t in types}
         assert "Point" in names
 
     def test_finds_functions(self):

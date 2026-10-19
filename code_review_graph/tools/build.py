@@ -27,6 +27,57 @@ from ._common import _get_store
 
 logger = logging.getLogger(__name__)
 
+
+def render_signature(
+    name: str,
+    kind: str,
+    params: str | None = None,
+    ret: str | None = None,
+    language: str | None = None,
+) -> str:
+    """One human-readable signature for a node, in its own language.
+
+    The Python-shaped ``def f(args) -> Ret`` form was applied to every
+    language. On C/C++/Rust/Go it is wrong syntax and, worse, it hid
+    that ``params``/``return_type`` were NULL: `def f()` looks like a
+    complete answer for a function whose signature was never parsed.
+
+    Python keeps ``def`` -- there it IS the source form. Every other
+    language gets the C-family shape when a return type is known and a
+    bare call form when none was parsed, so an unparsed signature reads
+    as incomplete instead of confidently wrong.
+    """
+    if kind not in ("Function", "Test"):
+        if kind == "Class":
+            return f"class {name}"
+        return name
+    inner = normalize_params(params)
+    if language == "python":
+        sig = f"def {name}({inner})"
+        if ret:
+            sig += f" -> {ret}"
+        return sig
+    if ret:
+        return f"{ret} {name}({inner})"
+    if inner:
+        return f"{name}({inner})"
+    return f"{name}()"
+
+
+def normalize_params(params: str | None) -> str:
+    """Strip the enclosing parentheses a captured parameter_list carries.
+
+    ``parameter_list`` text includes its own ``(...)``, so splicing it
+    into an f-string that already supplies a pair produced
+    ``f((int a, int b))`` -- doubled parentheses on every C/C++ node.
+    """
+    if not params:
+        return ""
+    text = " ".join(params.split())
+    if text.startswith("(") and text.endswith(")"):
+        text = text[1:-1]
+    return text.strip()
+
 # The build-state vocabulary is imported above rather than defined here:
 # ``full_build`` has to advance it as soon as the last file is stored, and it
 # cannot import this module without a cycle. See
@@ -216,21 +267,15 @@ def _run_postprocess(
         rows = store.get_nodes_without_signature()
         signature_rows: list[tuple[str, int]] = []
         for row in rows:
-            node_id, name, kind, params, ret = (
+            node_id, name, kind, params, ret, language = (
                 row[0],
                 row[1],
                 row[2],
                 row[3],
                 row[4],
+                row[5],
             )
-            if kind in ("Function", "Test"):
-                sig = f"def {name}({params or ''})"
-                if ret:
-                    sig += f" -> {ret}"
-            elif kind == "Class":
-                sig = f"class {name}"
-            else:
-                sig = name
+            sig = render_signature(name, kind, params, ret, language)
             signature_rows.append((sig[:512], node_id))
         # Single transaction via executemany instead of one autocommitted
         # UPDATE per node (issue #721).
@@ -835,21 +880,15 @@ def run_postprocess(
             rows = store.get_nodes_without_signature()
             signature_rows: list[tuple[str, int]] = []
             for row in rows:
-                node_id, name, kind, params, ret = (
+                node_id, name, kind, params, ret, language = (
                     row[0],
                     row[1],
                     row[2],
                     row[3],
                     row[4],
+                    row[5],
                 )
-                if kind in ("Function", "Test"):
-                    sig = f"def {name}({params or ''})"
-                    if ret:
-                        sig += f" -> {ret}"
-                elif kind == "Class":
-                    sig = f"class {name}"
-                else:
-                    sig = name
+                sig = render_signature(name, kind, params, ret, language)
                 signature_rows.append((sig[:512], node_id))
             # Single transaction via executemany instead of one autocommitted
             # UPDATE per node (issue #721).

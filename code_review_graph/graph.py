@@ -3353,7 +3353,7 @@ class GraphStore:
     def get_nodes_without_signature(self) -> list[sqlite3.Row]:
         """Return raw rows for nodes that have no signature yet."""
         return self._conn.execute(
-            "SELECT id, name, kind, params, return_type "
+            "SELECT id, name, kind, params, return_type, language "
             "FROM nodes WHERE signature IS NULL"
         ).fetchall()
 
