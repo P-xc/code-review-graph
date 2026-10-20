@@ -545,6 +545,32 @@ def _write_sidecar(
     return (f'<script src="{name}"></script>', _SIDECAR_GLOBAL)
 
 
+_MARKER_RE = re.compile(r"__T\[([^\]]*)\]__")
+
+
+def _apply_translations(html: str, translator) -> str:
+    """Substitute __T[key]__ markers with the translator's strings.
+
+    Runs over the trusted template, before any repo-derived payload is
+    spliced in, so graph content cannot forge a marker.
+    """
+    return _MARKER_RE.sub(lambda m: translator(m.group(1)), html)
+
+
+def _translator_for(lang: str | None = None):
+    """Build a Translator for the requested language.
+
+    An absent *lang* means English, not "guess from the machine".
+    Letting the library auto-detect made its output depend on where it
+    ran, which is wrong for a library and broke every test that asserts
+    on the page text. Detection belongs at the CLI, which knows the
+    user's environment and passes an explicit choice.
+    """
+    from .i18n import DEFAULT_LANGUAGE, Translator
+
+    return Translator(lang or DEFAULT_LANGUAGE)
+
+
 def generate_html(
     store: GraphStore,
     output_path: str | Path,
@@ -562,6 +588,7 @@ def generate_html(
     max_nodes: int = DEFAULT_MAX_NODES,
     report: dict | None = None,
     sidecar: bool = False,
+    lang: str | None = None,
 ) -> Path:
     """Generate a self-contained interactive HTML visualization.
 
@@ -592,6 +619,12 @@ def generate_html(
         sidecar: Write the payload to a ``<name>.data.js`` file next to the
             page instead of inlining it.  Opt-in: the default is still one
             self-contained file you can email.
+        lang: UI language for the page (``"en"``, ``"zh"``). Omitted, it
+            is detected from an explicit argument, ``CRG_LANG``, the
+            process locale, then the OS UI language, falling back to
+            English. Only the page's own labels are translated: node
+            names, signatures and paths come from the analyzed source
+            and are never rewritten.
 
     Writes the HTML file to *output_path* and returns the resolved Path.
     """
@@ -684,6 +717,9 @@ def generate_html(
     # Substitute the script tags into the trusted template BEFORE the graph
     # data: graph content is repo-derived, and running a replace over it would
     # let a node literally named __D3_SCRIPTS__ inject markup into the page.
+    # Translate the trusted template BEFORE splicing in graph data, so a
+    # node named __T[...]__ cannot inject markup through this path.
+    template = _apply_translations(template, _translator_for(lang))
     html = template.replace("__D3_SCRIPTS__", _d3_script_tags())
     sidecar_tag, payload = _write_sidecar(output_path, data_json, sidecar)
     html = html.replace("__SIDECAR_SCRIPT__", sidecar_tag)
@@ -708,7 +744,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Code Review Graph</title>
+<title>__T[page.title]__</title>
 __D3_SCRIPTS__
 __SIDECAR_SCRIPT__
 <style>
@@ -978,9 +1014,9 @@ __SIDECAR_SCRIPT__
 </style>
 </head>
 <body>
-<a href="#graph-svg" class="skip-link">Skip to graph</a>
-<nav id="legend" aria-label="Graph legend">
-  <h3>Nodes</h3>
+<a href="#graph-svg" class="skip-link">__T[skip.to_graph]__</a>
+<nav id="legend" aria-label="__T[legend.heading]__">
+  <h3>__T[stats.nodes]__</h3>
   <div class="legend-section">
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><circle r="6" fill="#58a6ff"/></svg> File</div>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><rect x="-5" y="-5" width="10" height="10" fill="#f0883e"/></svg> Class</div>
@@ -988,7 +1024,7 @@ __SIDECAR_SCRIPT__
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,0 0,6 -6,0" fill="#d2a8ff"/></svg> Test</div>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M-2,-6v4h-4v4h4v4h4v-4h4v-4h-4v-4z" fill="#8b949e"/></svg> Type</div>
   </div>
-  <h3>Edges</h3>
+  <h3>__T[stats.edges]__</h3>
   <div class="legend-section">
     <button class="legend-item legend-edge" data-edge-kind="CALLS" aria-pressed="true"><span class="legend-line l-calls"></span> Calls</button>
     <button class="legend-item legend-edge" data-edge-kind="IMPORTS_FROM" aria-pressed="true"><span class="legend-line l-imports"></span> Imports</button>
@@ -1000,7 +1036,7 @@ __SIDECAR_SCRIPT__
   </div>
 </nav>
 <div id="filter-panel">
-  <h3>Filter by Kind</h3>
+  <h3>__T[filter.heading]__</h3>
   <label class="filter-item"><input type="checkbox" data-kind="File" checked> File</label>
   <label class="filter-item"><input type="checkbox" data-kind="Class" checked> Class</label>
   <label class="filter-item"><input type="checkbox" data-kind="Function" checked> Function</label>
@@ -1008,46 +1044,46 @@ __SIDECAR_SCRIPT__
   <label class="filter-item"><input type="checkbox" data-kind="Type" checked> Type</label>
 </div>
 <div id="controls">
-  <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="Search graph nodes by name" aria-controls="search-results" aria-expanded="false">
-  <select id="flow-select" aria-label="Select execution flow to highlight"><option value="">Flows</option></select>
-  <button id="btn-community" title="Toggle community coloring" aria-label="Toggle community coloring" aria-pressed="false">Communities</button>
-  <button id="btn-fit" title="Fit to screen" aria-label="Fit graph to screen">Fit</button>
-  <button id="btn-labels" title="Toggle labels" class="active" aria-label="Toggle node labels" aria-pressed="true">Labels</button>
-  <button id="btn-help" title="Keyboard shortcuts" aria-label="Show keyboard shortcuts">?</button>
+  <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="__T[search.placeholder]__" aria-controls="search-results" aria-expanded="false">
+  <select id="flow-select" aria-label="__T[filter.select_flow]__"><option value="">__T[filter.flows]__</option></select>
+  <button id="btn-community" title="__T[view.toggle_community]__" aria-label="__T[view.toggle_community]__" aria-pressed="false">__T[view.communities]__</button>
+  <button id="btn-fit" title="__T[fit]__" aria-label="__T[fit_graph]__">Fit</button>
+  <button id="btn-labels" title="__T[view.toggle_labels]__" class="active" aria-label="__T[view.toggle_node_labels]__" aria-pressed="true">__T[view.labels]__</button>
+  <button id="btn-help" title="__T[help.shortcuts]__" aria-label="__T[help.show]__">?</button>
 </div>
-<div id="search-results" role="listbox" aria-label="Search results"></div>
-<div id="detail-panel" role="dialog" aria-label="Node detail" aria-modal="false"><button class="dp-close" aria-label="Close detail panel">&times;</button><div id="dp-content" tabindex="-1"></div></div>
-<div id="stats-bar" role="status" aria-label="Graph statistics"></div>
-<div id="nb-bar" role="status" aria-label="Neighbourhood view"></div>
-<div id="community-legend" aria-label="Community legend"></div>
+<div id="search-results" role="listbox" aria-label="__T[search.results]__"></div>
+<div id="detail-panel" role="dialog" aria-label="__T[detail.heading]__" aria-modal="false"><button class="dp-close" aria-label="__T[detail.close]__">&times;</button><div id="dp-content" tabindex="-1"></div></div>
+<div id="stats-bar" role="status" aria-label="__T[stats.heading]__"></div>
+<div id="nb-bar" role="status" aria-label="__T[neighbourhood.heading]__"></div>
+<div id="community-legend" aria-label="__T[legend.community]__"></div>
 <div id="tooltip" role="tooltip" aria-live="polite"></div>
-<div id="help-overlay" class="hidden" role="dialog" aria-label="Help overlay" aria-modal="true">
+<div id="help-overlay" class="hidden" role="dialog" aria-label="__T[help.overlay]__" aria-modal="true">
   <div class="help-content">
-    <h2>Graph Interactions</h2>
-    <button class="dp-close help-close" aria-label="Close help">&times;</button>
+    <h2>__T[help.heading]__</h2>
+    <button class="dp-close help-close" aria-label="__T[help.close]__">&times;</button>
     <table>
-      <tr><td>Click a file</td><td>Expand/collapse contained symbols</td></tr>
-      <tr><td>Click symbol</td><td>Show detail panel with callers/callees</td></tr>
+      <tr><td>__T[help.click_file]__</td><td>__T[help.click_file_desc]__</td></tr>
+      <tr><td>__T[help.click_symbol]__</td><td>__T[help.click_symbol_desc]__</td></tr>
       <tr><td>Shift+click file</td><td>Show detail panel without toggling collapse</td></tr>
-      <tr><td>Hover</td><td>Highlight connected nodes and edges</td></tr>
-      <tr><td>Drag</td><td>Pin a node in place</td></tr>
-      <tr><td>Scroll</td><td>Zoom in/out</td></tr>
-      <tr><td>Click+drag background</td><td>Pan the view</td></tr>
-      <tr><td>Search</td><td>Type to filter &mdash; matching nodes stay bright</td></tr>
-      <tr><td>Legend edges</td><td>Click edge types in the legend to toggle visibility</td></tr>
-      <tr><td>Click frontier node</td><td>Neighbourhood view: reveal that node&#39;s next ring</td></tr>
+      <tr><td>__T[help.hover]__</td><td>__T[help.hover_desc]__</td></tr>
+      <tr><td>__T[help.drag]__</td><td>__T[help.drag_desc]__</td></tr>
+      <tr><td>__T[help.scroll]__</td><td>__T[help.scroll_desc]__</td></tr>
+      <tr><td>__T[help.click_drag_bg]__</td><td>__T[help.pan_desc]__</td></tr>
+      <tr><td>__T[help.search]__</td><td>__T[help.search_desc]__</td></tr>
+      <tr><td>__T[help.legend_edges]__</td><td>__T[help.legend_edges_desc]__</td></tr>
+      <tr><td>__T[help.frontier]__</td><td>Neighbourhood view: reveal that node&#39;s next ring</td></tr>
       <tr><td>+1 hop</td><td>Neighbourhood view: reveal the whole next ring at once</td></tr>
     </table>
-    <h2 style="margin-top:16px">Keyboard Shortcuts</h2>
+    <h2 style="margin-top:16px">__T[keys.heading]__</h2>
     <table>
-      <tr><td><kbd>/</kbd></td><td>Focus search</td></tr>
-      <tr><td><kbd>?</kbd></td><td>Toggle this help</td></tr>
+      <tr><td><kbd>/</kbd></td><td>__T[keys.focus_search]__</td></tr>
+      <tr><td><kbd>?</kbd></td><td>__T[keys.toggle_help]__</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>Close panel / search / help</td></tr>
-      <tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Activate focused node</td></tr>
-      <tr><td><kbd>Arrow keys</kbd></td><td>Navigate between nodes</td></tr>
+      <tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>__T[keys.activate]__</td></tr>
+      <tr><td><kbd>Arrow keys</kbd></td><td>__T[keys.navigate]__</td></tr>
       <tr><td><kbd>e</kbd></td><td>Neighbourhood view: expand one more hop</td></tr>
     </table>
-    <span class="help-dismiss">Click anywhere outside to dismiss</span>
+    <span class="help-dismiss">__T[help.dismiss]__</span>
   </div>
 </div>
 <div id="loading-overlay" aria-live="polite">
@@ -1058,10 +1094,10 @@ __SIDECAR_SCRIPT__
 </div>
 <div id="empty-state" role="status">
   <div class="empty-icon">&#x1F50D;</div>
-  <div class="empty-title">No nodes to display</div>
+  <div class="empty-title">__T[empty.title]__</div>
   <div class="empty-desc">The graph is empty. Run <strong>code-review-graph build</strong> to index your codebase, then regenerate the visualization.</div>
 </div>
-<svg id="graph-svg" tabindex="-1" role="img" aria-label="Interactive code knowledge graph visualization. Use search to find nodes, click files to expand."></svg>
+<svg id="graph-svg" tabindex="-1" role="img" aria-label="__T[svg.desc]__"></svg>
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
@@ -1189,12 +1225,12 @@ function showTooltip(ev, d) {
   var h = '<span class="tt-name">' + escH(d.label) + '</span>';
   h += '<span class="tt-kind" style="background:' + bg + ';color:#0d1117">' + escH(d.kind) + '</span>';
   if (relFile) h += '<div class="tt-row tt-file">' + escH(relFile) + '</div>';
-  if (d.line_start != null) h += '<div class="tt-row"><span class="tt-label">Lines: </span>' + d.line_start + ' \u2013 ' + (d.line_end || d.line_start) + '</div>';
-  if (d.params) h += '<div class="tt-row"><span class="tt-label">Params: </span>' + escH(d.params) + '</div>';
-  if (d.return_type) h += '<div class="tt-row"><span class="tt-label">Returns: </span>' + escH(d.return_type) + '</div>';
+  if (d.line_start != null) h += '<div class="tt-row"><span class="tt-label">__T[detail.lines]__</span>' + d.line_start + ' \u2013 ' + (d.line_end || d.line_start) + '</div>';
+  if (d.params) h += '<div class="tt-row"><span class="tt-label">__T[detail.params]__</span>' + escH(d.params) + '</div>';
+  if (d.return_type) h += '<div class="tt-row"><span class="tt-label">__T[detail.returns]__</span>' + escH(d.return_type) + '</div>';
   if (d.community_id != null) {
     var comm = communities.find(function(c) { return c.id === d.community_id; });
-    if (comm) h += '<div class="tt-row"><span class="tt-label">Community: </span>' + escH(comm.name) + '</div>';
+    if (comm) h += '<div class="tt-row"><span class="tt-label">__T[detail.community]__</span>' + escH(comm.name) + '</div>';
   }
   tooltip.textContent = "";
   tooltip.insertAdjacentHTML("beforeend", h);
@@ -1486,12 +1522,12 @@ function nbRenderBar() {
       + ' aria-expanded="' + (nbSeedListOpen ? "true" : "false") + '">'
       + "+" + overflow + " more</button>";
   }
-  h += '<span class="nb-meta">hop ' + nbVisibleDepth + " of " + neighbourhood.depth
+  h += '<span class="nb-meta">__T[neighbourhood.hop]__' + nbVisibleDepth + " of " + neighbourhood.depth
     + " \u00b7 " + shownCount + " of " + nodes.length + " loaded"
     + " \u00b7 " + neighbourhood.total_nodes + " in repo</span>";
   if (neighbourhood.path_error) h += '<span class="nb-warn">' + escH(neighbourhood.path_error) + "</span>";
   else if (nbPathList.length) {
-    h += '<span class="nb-meta">path: ' + nbPathList.length + " nodes"
+    h += '<span class="nb-meta">__T[neighbourhood.path]__' + nbPathList.length + " nodes"
       + (neighbourhood.path_directed ? "" : " (undirected)") + "</span>";
   }
   if (neighbourhood.seeds_dropped) {
@@ -1499,12 +1535,12 @@ function nbRenderBar() {
       + neighbourhood.seeds_requested + " seeds dropped for --max-nodes "
       + neighbourhood.max_nodes + "</span>";
   } else if (neighbourhood.truncated) {
-    h += '<span class="nb-warn">trimmed to ' + neighbourhood.max_nodes + " nodes</span>";
+    h += '<span class="nb-warn">__T[neighbourhood.trimmed]__' + neighbourhood.max_nodes + " nodes</span>";
   }
   h += '<button id="nb-expand" type="button">+1 hop</button>';
-  h += '<button id="nb-reset" type="button">Reset</button>';
+  h += '<button id="nb-reset" type="button">__T[reset]__</button>';
   if (overflow > 0) {
-    h += '<ul id="nb-seed-list" aria-label="All neighbourhood seeds"'
+    h += '<ul id="nb-seed-list" aria-label="__T[neighbourhood.all_seeds]__"'
       + (nbSeedListOpen ? "" : " hidden") + ">";
     for (var si = 0; si < entries.length; si++) {
       h += "<li>" + escH(entries[si]) + "</li>";
@@ -1644,7 +1680,7 @@ var hiddenCommunities = new Set();
 (function buildCommunityLegend() {
   var cl = document.getElementById("community-legend");
   if (!communities.length) return;
-  var h = '<h3>Communities</h3>';
+  var h = '<h3>__T[view.communities]__</h3>';
   communities.slice(0, 30).forEach(function(c) {
     var col = communityColorScale(c.id);
     var nm = escH(c.name || ("Community " + c.id));
@@ -2093,27 +2129,27 @@ __SIDECAR_SCRIPT__
 </style>
 </head>
 <body>
-<div id="legend" role="complementary" aria-label="Graph legend">
-  <h3>Nodes</h3>
+<div id="legend" role="complementary" aria-label="__T[legend.heading]__">
+  <h3>__T[stats.nodes]__</h3>
   <div class="legend-section" id="legend-nodes"></div>
-  <h3>Edges</h3>
+  <h3>__T[stats.edges]__</h3>
   <div class="legend-section" id="legend-edges"></div>
 </div>
 <div id="filter-panel">
-  <h3>View Mode</h3>
+  <h3>__T[view.heading]__</h3>
   <div id="filter-info" style="color:#8b949e;font-size:11px;"></div>
 </div>
 <div id="controls">
-  <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="Search graph nodes by name">
-  <button id="btn-fit" title="Fit to screen" aria-label="Fit graph to screen">Fit</button>
-  <button id="btn-labels" title="Toggle labels" class="active" aria-label="Toggle node labels" aria-pressed="true">Labels</button>
+  <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="__T[search.placeholder]__">
+  <button id="btn-fit" title="__T[fit]__" aria-label="__T[fit_graph]__">Fit</button>
+  <button id="btn-labels" title="__T[view.toggle_labels]__" class="active" aria-label="__T[view.toggle_node_labels]__" aria-pressed="true">__T[view.labels]__</button>
 </div>
 <div id="search-results"></div>
-<div id="detail-panel"><button class="dp-close" aria-label="Close detail panel">&times;</button><div id="dp-content"></div></div>
-<div id="stats-bar" role="status" aria-label="Graph statistics"></div>
+<div id="detail-panel"><button class="dp-close" aria-label="__T[detail.close]__">&times;</button><div id="dp-content"></div></div>
+<div id="stats-bar" role="status" aria-label="__T[stats.heading]__"></div>
 <div id="tooltip"></div>
-<button id="btn-back" aria-label="Back to overview">&larr; Back to Overview</button>
-<svg id="graph-svg" role="img" aria-label="Interactive code knowledge graph visualization (aggregated view)."></svg>
+<button id="btn-back" aria-label="__T[neighbourhood.back]__">&larr; Back to Overview</button>
+<svg id="graph-svg" role="img" aria-label="__T[svg.desc.aggregated]__"></svg>
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
