@@ -53,6 +53,7 @@ from typing import Iterable, TypedDict
 from .errors import CodeReviewGraphError, is_lock_error
 from .neighbourhood import DEFAULT_DEPTH as NB_DEFAULT_DEPTH
 from .neighbourhood import DEFAULT_MAX_NODES as NB_DEFAULT_MAX_NODES
+from .i18n import detect_language
 
 logger = logging.getLogger(__name__)
 
@@ -1198,6 +1199,14 @@ def build_parser() -> argparse.ArgumentParser:
     # visualize
     vis_cmd = sub.add_parser("visualize", help="Generate interactive HTML graph visualization")
     vis_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    vis_cmd.add_argument(
+        "--lang",
+        default=None,
+        help=(
+            "UI language for the page: en or zh. Omitted, it follows "
+            "CRG_LANG, then the process locale, then the OS UI language."
+        ),
+    )
     vis_cmd.add_argument(
         "--mode",
         choices=["auto", "full", "community", "file"],
@@ -2564,6 +2573,7 @@ def _dispatch() -> None:
                         max_nodes=max_nodes,
                         report=seed_report,
                         sidecar=getattr(args, "sidecar", False),
+                        lang=detect_language(getattr(args, "lang", None)),
                     )
                 except (SeedResolutionError, ValueError) as exc:
                     print(f"visualize: {exc}", file=sys.stderr)

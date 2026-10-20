@@ -218,7 +218,7 @@ def test_generate_html(store_with_data, tmp_path):
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
     assert output_path.exists()
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     script_sources, _inline_scripts = _extract_scripts(content)
     assert script_sources == [_D3_FILENAME]
     assert "auth.py" in content
@@ -249,7 +249,7 @@ def test_generated_html_loads_d3_same_origin_with_sri(store_with_data, tmp_path,
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path, mode=vis_mode)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
 
     script_sources, inline_scripts = _extract_scripts(content)
     # Same-origin, offline-first D3 reference — no external host required.
@@ -322,7 +322,7 @@ def test_graph_data_containing_script_sentinel_is_not_expanded(tmp_path, vis_mod
 
     output_path = tmp_path / "graph.html"
     generate_html(store, output_path, mode=vis_mode)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
 
     script_sources, inline_scripts = _extract_scripts(content)
     # Exactly the vendored D3 reference — no injected external script tags.
@@ -410,9 +410,9 @@ def test_generate_html_overwrites(store_with_data, tmp_path):
     from code_review_graph.visualization import generate_html
 
     output_path = tmp_path / "graph.html"
-    output_path.write_text("old content")
+    output_path.write_text("old content", encoding="utf-8")
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert "old content" not in content
     assert "<!DOCTYPE html>" in content
 
@@ -441,7 +441,7 @@ def test_generate_html_includes_all_edge_types(store_with_data, tmp_path):
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     for edge_kind in ["CALLS", "IMPORTS_FROM", "INHERITS", "CONTAINS",
                        "IMPLEMENTS", "TESTED_BY", "DEPENDS_ON"]:
         assert edge_kind in content, f"Edge type {edge_kind} missing from HTML"
@@ -453,7 +453,7 @@ def test_generate_html_includes_interactive_features(store_with_data, tmp_path):
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     # Detail panel
     assert "detail-panel" in content
     # Community coloring button
@@ -478,7 +478,7 @@ def test_generate_html_includes_node_shapes(store_with_data, tmp_path):
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert "d3.symbol()" in content or "symbolCircle" in content
     assert "symbolSquare" in content
     assert "symbolTriangle" in content
@@ -492,7 +492,7 @@ def test_generate_html_includes_help_overlay(store_with_data, tmp_path):
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert "help-overlay" in content
     assert "btn-help" in content
     assert "Click a file" in content
@@ -504,7 +504,7 @@ def test_generate_html_includes_aria_attributes(store_with_data, tmp_path):
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert 'role="tooltip"' in content
     assert 'role="dialog"' in content
     assert 'role="listbox"' in content
@@ -518,7 +518,7 @@ def test_generate_html_includes_loading_and_empty_state(store_with_data, tmp_pat
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert "loading-overlay" in content
     assert "empty-state" in content
     assert "No nodes to display" in content
@@ -536,7 +536,7 @@ def test_generate_html_uses_id_selector_for_svg(store_with_data, tmp_path):
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert 'd3.select("#graph-svg")' in content, (
         "HTML should use d3.select('#graph-svg') to target the main canvas, "
         "not d3.select('svg') which selects the first inline legend icon"
@@ -552,7 +552,7 @@ def test_community_mode_uses_id_selector_for_svg(large_store, tmp_path):
 
     output_path = tmp_path / "community.html"
     generate_html(large_store, output_path, mode="community")
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert 'd3.select("#graph-svg")' in content
     assert 'd3.select("svg")' not in content
     assert 'id="graph-svg"' in content, (
@@ -595,7 +595,7 @@ def test_full_mode_retries_layout_and_tracks_viewport(store_with_data, tmp_path)
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path, mode="full")
-    _assert_responsive_graph_script(output_path.read_text())
+    _assert_responsive_graph_script(output_path.read_text(encoding="utf-8"))
 
 
 def test_community_mode_retries_layout_and_tracks_viewport(large_store, tmp_path):
@@ -604,7 +604,7 @@ def test_community_mode_retries_layout_and_tracks_viewport(large_store, tmp_path
 
     output_path = tmp_path / "community.html"
     generate_html(large_store, output_path, mode="community")
-    _assert_responsive_graph_script(output_path.read_text())
+    _assert_responsive_graph_script(output_path.read_text(encoding="utf-8"))
 
 
 def test_generate_html_includes_focus_visible(store_with_data, tmp_path):
@@ -613,7 +613,7 @@ def test_generate_html_includes_focus_visible(store_with_data, tmp_path):
 
     output_path = tmp_path / "graph.html"
     generate_html(store_with_data, output_path)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert ":focus-visible" in content
 
 
@@ -791,7 +791,7 @@ def test_auto_mode_switches_at_threshold(large_store, tmp_path):
     output_path = tmp_path / "auto_low.html"
     # Threshold higher than node count -> should use full template
     generate_html(large_store, output_path, mode="auto", max_full_nodes=100000)
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     # Full template has btn-community and flow-select
     assert "btn-community" in content
     assert "flow-select" in content
@@ -799,7 +799,7 @@ def test_auto_mode_switches_at_threshold(large_store, tmp_path):
     output_path2 = tmp_path / "auto_high.html"
     # Threshold of 1 -> should switch to community mode
     generate_html(large_store, output_path2, mode="auto", max_full_nodes=1)
-    content2 = output_path2.read_text()
+    content2 = output_path2.read_text(encoding="utf-8")
     # Aggregated template has btn-back and community_details
     assert "btn-back" in content2
     assert "community_details" in content2
@@ -819,7 +819,7 @@ def test_auto_mode_switches_on_edge_count(large_store, tmp_path):
         large_store, output_full, mode="auto",
         max_full_nodes=100000, max_full_edges=100000,
     )
-    content_full = output_full.read_text()
+    content_full = output_full.read_text(encoding="utf-8")
     assert "btn-community" in content_full
     assert "flow-select" in content_full
 
@@ -829,7 +829,7 @@ def test_auto_mode_switches_on_edge_count(large_store, tmp_path):
         large_store, output_agg, mode="auto",
         max_full_nodes=100000, max_full_edges=1,
     )
-    content_agg = output_agg.read_text()
+    content_agg = output_agg.read_text(encoding="utf-8")
     assert "btn-back" in content_agg
     assert "community_details" in content_agg
 
@@ -910,7 +910,7 @@ def test_auto_mode_falls_back_to_file_without_communities(
         store_with_data, output_path, mode="auto",
         max_full_nodes=1, max_full_edges=100000,
     )
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     # Aggregated template, file mode data
     assert "btn-back" in content
     assert '"mode": "file"' in content
@@ -923,7 +923,7 @@ def test_community_mode_html_generation(large_store, tmp_path):
 
     output_path = tmp_path / "community.html"
     generate_html(large_store, output_path, mode="community")
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert "<!DOCTYPE html>" in content
     assert "</html>" in content
     assert "btn-back" in content
@@ -937,7 +937,7 @@ def test_file_mode_html_generation(large_store, tmp_path):
 
     output_path = tmp_path / "file.html"
     generate_html(large_store, output_path, mode="file")
-    content = output_path.read_text()
+    content = output_path.read_text(encoding="utf-8")
     assert "<!DOCTYPE html>" in content
     assert "</html>" in content
     assert "DEPENDS_ON" in content
@@ -950,14 +950,14 @@ def test_full_mode_backward_compatible(store_with_data, tmp_path):
     # Original 2-arg call (backward compat)
     output1 = tmp_path / "compat.html"
     generate_html(store_with_data, output1)
-    content1 = output1.read_text()
+    content1 = output1.read_text(encoding="utf-8")
     assert "btn-community" in content1
     assert "flow-select" in content1
 
     # Explicit full mode
     output2 = tmp_path / "full.html"
     generate_html(store_with_data, output2, mode="full")
-    content2 = output2.read_text()
+    content2 = output2.read_text(encoding="utf-8")
     assert "btn-community" in content2
     assert "flow-select" in content2
 
